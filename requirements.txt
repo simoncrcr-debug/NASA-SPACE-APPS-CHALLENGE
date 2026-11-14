@@ -1,0 +1,4 @@
+numpy>=2.0
+Pillow>=10.0
+# Opcional pero requerido para leer FITS en el motor:
+astropy>=6.0

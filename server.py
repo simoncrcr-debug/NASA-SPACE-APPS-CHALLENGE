@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Servidor local para Cielo Claro: sirve la página y conecta con IRSA SIA2."""
+"""Servidor local para AerosphereX: sirve la página y conecta con IRSA (SIA2, MOST), SIMBAD y JPL Horizons."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
@@ -11,6 +11,7 @@ import posixpath
 import re
 import shutil
 import tempfile
+import time
 import unicodedata
 import webbrowser
 
@@ -20,11 +21,12 @@ HOST = "127.0.0.1"
 PORT = 8765
 MAX_FITS_BYTES = 512 * 1024 * 1024
 IRSA_HOST = "irsa.ipac.caltech.edu"
-FITS_PATH_PREFIX = "/ibe/data/spherex/"
+# Image archives the local connector may download from: SPHEREx and NEOWISE single-exposure frames.
+FITS_PATH_PREFIXES = ("/ibe/data/spherex/", "/ibe/data/wise/neowiser/p1bm_frm/")
 
 
 def is_official_fits_url(url):
-    """True only for https URLs on IRSA under the SPHEREx data path (no dot-segment escapes)."""
+    """True only for https URLs on IRSA under the SPHEREx/NEOWISE data paths (no dot-segment escapes)."""
     try:
         parsed = urlparse(url)
     except ValueError:
@@ -32,19 +34,30 @@ def is_official_fits_url(url):
     if parsed.scheme != "https" or parsed.hostname != IRSA_HOST or parsed.port not in (None, 443):
         return False
     normalized = posixpath.normpath(parsed.path)
-    return normalized.startswith(FITS_PATH_PREFIX) and normalized == parsed.path.rstrip("/")
+    return normalized.startswith(FITS_PATH_PREFIXES) and normalized == parsed.path.rstrip("/")
 
 
 class OfficialFitsRedirectHandler(HTTPRedirectHandler):
-    """Follow redirects only while they stay on the official IRSA SPHEREx data path."""
+    """Follow redirects only while they stay on the official IRSA image data paths."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not is_official_fits_url(newurl):
-            raise HTTPError(newurl, code, "Redirección fuera de IRSA/SPHEREx bloqueada.", headers, fp)
+            raise HTTPError(newurl, code, "Redirección fuera de los archivos de IRSA bloqueada.", headers, fp)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 FITS_OPENER = build_opener(OfficialFitsRedirectHandler)
+
+
+def open_with_retry(request, timeout, attempts=3):
+    """IRSA's cutout service answers 503 "Server busy, retry later" under load; wait briefly and retry."""
+    for attempt in range(attempts):
+        try:
+            return FITS_OPENER.open(request, timeout=timeout)
+        except HTTPError as exc:
+            if exc.code not in (502, 503, 504) or attempt == attempts - 1:
+                raise
+            time.sleep(2 * (attempt + 1))
 
 
 class FitsTooLarge(Exception):
@@ -65,29 +78,65 @@ MAJOR_BODIES = {
     "jupiter": "599", "saturno": "699", "saturn": "699", "urano": "799", "uranus": "799",
     "neptuno": "899", "neptune": "899", "pluton": "999", "pluto": "999",
 }
-BODY_NAME_RE = re.compile(r"^[0-9A-Za-zÀ-ÿ][0-9A-Za-zÀ-ÿ ./()\-_]{0,59}$")
-# Numbered periodic/interstellar comets ("3I", "1P/Halley") and provisional comet designations ("C/2025 N1").
-NUMBERED_COMET_RE = re.compile(r"^(\d{1,4}[PI])(?:\s*[/-].*)?$", re.IGNORECASE)
+BODY_NAME_RE = re.compile(r"^[0-9A-Za-zÀ-ÿ(][0-9A-Za-zÀ-ÿ ./()\-_]{0,59}$")  # "(" for "(3122) Florence"
+# Numbered periodic/interstellar comets ("3I", "3I Atlas", "1P/Halley") and provisional comet designations ("C/2025 N1").
+NUMBERED_COMET_RE = re.compile(r"^(\d{1,4}[PI])(?:[\s/-].*)?$", re.IGNORECASE)
 PROVISIONAL_COMET_RE = re.compile(r"^([PCDXI]/\d{4}\s+[A-Z]{1,2}\d{0,3})(?:\s*\(.*\))?$", re.IGNORECASE)
+# Numbered asteroids as people and IRSA write them: "3122", "3122 Florence", "(3122) Florence".
+PROVISIONAL_ASTEROID_RE = re.compile(r"^(\d{4})\s+([A-Za-z]{2}\d{0,4})$")
+NUMBERED_ASTEROID_RE = re.compile(r"^\(?(\d{1,7})\)?(?:\s+[A-Za-zÀ-ÿ].*)?$")
+# NAIF IDs as used in IRSA links (obj_naifid=20003122): 2000000+n / 20000000+n asteroids, 1000000+ comets.
+NAIF_SMALL_BODY_RE = re.compile(r"^(?:naif\s*:?\s*)?([12]\d{6,7})$", re.IGNORECASE)
 
 
 def strip_accents(text):
     return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
 
 
-def horizons_commands(name):
-    """Ordered Horizons COMMAND candidates; the first one that yields an ephemeris wins."""
-    key = strip_accents(name).lower().strip()
+def classify_body(name):
+    """Normalize a free-text body name into one of: major, comet, asteroid_number, naif, text."""
+    name = re.sub(r"\s+", " ", name.strip())
+    key = strip_accents(name).lower()
     if key in MAJOR_BODIES:
-        return [MAJOR_BODIES[key]]
+        return {"kind": "major", "id": MAJOR_BODIES[key]}
+    m = NAIF_SMALL_BODY_RE.match(name)
+    if m:
+        naif = m.group(1)
+        if naif.startswith("2"):  # 20000000+n (current) or 2000000+n (legacy) numbered asteroid
+            n = int(naif) - (20000000 if len(naif) == 8 else 2000000)
+            if n > 0:
+                return {"kind": "asteroid_number", "number": n, "naif": str(20000000 + n)}
+        elif len(naif) == 7:  # 1000000+ comet record
+            return {"kind": "naif", "naif": naif}
     m = NUMBERED_COMET_RE.match(name)
-    if m:  # bare "1P" would match unrelated bodies, so force a designation search
-        return ["DES=%s;CAP;NOFRAG" % m.group(1).upper()]
+    if m:  # bare "1P" would match unrelated bodies, so always search it as a designation
+        return {"kind": "comet", "des": m.group(1).upper()}
     m = PROVISIONAL_COMET_RE.match(name)
     if m:
-        return ["DES=%s;CAP;NOFRAG" % re.sub(r"\s+", " ", m.group(1).upper())]
+        return {"kind": "comet", "des": re.sub(r"\s+", " ", m.group(1).upper())}
+    m = PROVISIONAL_ASTEROID_RE.match(name)
+    if m:  # "2024 YR4" is a designation, not asteroid number 2024
+        return {"kind": "text", "name": "%s %s" % (m.group(1), m.group(2).upper())}
+    m = NUMBERED_ASTEROID_RE.match(name)
+    if m:
+        n = int(m.group(1))
+        return {"kind": "asteroid_number", "number": n, "naif": str(20000000 + n)}
+    return {"kind": "text", "name": name}
+
+
+def horizons_commands(name):
+    """Ordered Horizons COMMAND candidates; the first one that yields an ephemeris wins."""
+    body = classify_body(name)
+    if body["kind"] == "major":
+        return [body["id"]]
+    if body["kind"] == "comet":
+        return ["DES=%s;CAP;NOFRAG" % body["des"]]
+    if body["kind"] == "asteroid_number":
+        return ["%d;" % body["number"]]
+    if body["kind"] == "naif":
+        return [body["naif"]]
     # Trailing ';' restricts the lookup to small bodies (asteroids/comets), then fall back to major bodies.
-    return [name + ";", name]
+    return [body["name"] + ";", body["name"]]
 
 
 def query_horizons(command, center, jd):
@@ -96,7 +145,7 @@ def query_horizons(command, center, jd):
         "TLIST": "'%.8f'" % jd, "QUANTITIES": "'1,9,19,20'", "OBJ_DATA": "NO", "MAKE_EPHEM": "YES",
         "ANG_FORMAT": "DEG", "CSV_FORMAT": "YES", "EXTRA_PREC": "YES",
     }
-    request = Request("%s?%s" % (HORIZONS_URL, urlencode(params)), headers={"User-Agent": "CieloClaro/1.0 (educational ephemeris lookup)"})
+    request = Request("%s?%s" % (HORIZONS_URL, urlencode(params)), headers={"User-Agent": "AerosphereX/1.0 (educational ephemeris lookup)"})
     with urlopen(request, timeout=60) as response:
         body = response.read(1024 * 1024)
     return json.loads(body.decode("utf-8")).get("result", "")
@@ -141,6 +190,90 @@ def parse_horizons(result):
     }
 
 
+# ---- IRSA MOST (Moving Object Search Tool): which archive frames contain a moving body? ----
+MOST_URL = "https://irsa.ipac.caltech.edu/cgi-bin/MOST/nph-most"
+MOST_CATALOGS = {"spherex": "spherex", "neowise": "wise_neowiser"}
+NEOWISE_FRAME_URL = "https://%s/ibe/data/wise/neowiser/p1bm_frm/%s/%s/%03d/%s%03d-w%s-int-1b.fits"
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+MAX_MOST_FRAMES = 800
+
+
+def most_params(name, catalog):
+    body = classify_body(name)
+    params = {"catalog": catalog, "output_mode": "Brief"}
+    if body["kind"] == "major":
+        params.update(input_type="naifid_input", obj_naifid=body["id"])
+    elif body["kind"] in ("asteroid_number", "naif"):
+        params.update(input_type="naifid_input", obj_naifid=body["naif"])
+    elif body["kind"] == "comet":
+        params.update(input_type="name_input", obj_name=body["des"])
+    else:
+        params.update(input_type="name_input", obj_name=body["name"])
+    return params
+
+
+def parse_ipac_table(text):
+    """Parse an IPAC fixed-width table: '\\key = "value"' metadata plus rows sliced at the '|' header columns."""
+    meta, rows, bars, names = {}, [], None, []
+    for line in text.splitlines():
+        if line.startswith("\\"):
+            key, _, value = line[1:].partition("=")
+            meta[key.strip()] = value.strip().strip('"').strip()
+        elif line.startswith("|"):
+            if bars is None:
+                bars = [i for i, ch in enumerate(line) if ch == "|"]
+                names = [line[bars[i] + 1:bars[i + 1]].strip() for i in range(len(bars) - 1)]
+        elif line.strip() and bars:
+            rows.append({names[i]: line[bars[i] + 1:bars[i + 1] + 1].strip() for i in range(len(names))})
+    return meta, rows, bars is not None
+
+
+def most_message(text):
+    """Readable text from a MOST reply that is not a table (unknown or ambiguous names)."""
+    plain = re.sub(r"<script.*?</script>|<style.*?</style>", " ", text, flags=re.S | re.I)
+    plain = re.sub(r"<[^>]+>", " ", plain)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    return plain[:400]
+
+
+def to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def most_frames(rows, mission):
+    frames = []
+    for r in rows:
+        frame = {
+            "ra": to_float(r.get("ra_obj")), "dec": to_float(r.get("dec_obj")),
+            "vmag": to_float(r.get("vmag")), "sun_dist": to_float(r.get("sun_dist")),
+            "geo_dist": to_float(r.get("geo_dist")), "phase": to_float(r.get("phase")),
+        }
+        if frame["ra"] is None or frame["dec"] is None:
+            continue
+        if mission == "neowise":
+            scan, frame_num, band = r.get("scan_id", ""), r.get("frame_num", ""), r.get("band", "")
+            if not (re.match(r"^\d{5}[a-z]$", scan) and frame_num.isdigit() and band in ("1", "2")):
+                continue
+            if r.get("qual_frame", "") == "0":  # frames flagged as unusable
+                continue
+            frame.update(date=r.get("date_obs", ""), mjd=to_float(r.get("mjd_obs")), band="W" + band,
+                         id="%s%03d" % (scan, int(frame_num)),
+                         url=NEOWISE_FRAME_URL % (IRSA_HOST, scan[-2:], scan, int(frame_num), scan, int(frame_num), band))
+        else:
+            uri = r.get("uri", "").lstrip("/")
+            if not uri.startswith("ibe/data/spherex/"):
+                continue
+            frame.update(date=r.get("start_date", ""), mjd=to_float(r.get("mjd_start")), band=r.get("productid", ""),
+                         id=r.get("observationid", ""), url="https://%s/%s" % (IRSA_HOST, uri),
+                         exposure=to_float(r.get("exposure_time")))
+        frames.append(frame)
+    frames.sort(key=lambda f: f.get("mjd") or 0)
+    return frames
+
+
 def horizons_candidates(result):
     """Lines listing alternative matches when Horizons could not pick one body."""
     lines = [l.strip() for l in result.splitlines()]
@@ -148,7 +281,7 @@ def horizons_candidates(result):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CieloClaro/1.0"
+    server_version = "AerosphereX/1.0"
 
     def log_message(self, fmt, *args):
         print("[%s] %s" % (self.log_date_time_string(), fmt % args))
@@ -165,8 +298,10 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_name(parse_qs(parsed.query))
         elif parsed.path == "/api/ephem":
             self.handle_ephem(parse_qs(parsed.query))
+        elif parsed.path == "/api/mos":
+            self.handle_mos(parse_qs(parsed.query))
         elif parsed.path == "/api/health":
-            self.send_json(200, {"ok": True, "service": "Cielo Claro", "irsa": IRSA_HOST})
+            self.send_json(200, {"ok": True, "service": "AerosphereX", "irsa": IRSA_HOST})
         else:
             self.serve_page(parsed.path)
 
@@ -200,7 +335,7 @@ class Handler(BaseHTTPRequestHandler):
         ]
         url = "https://%s/SIA?%s" % (IRSA_HOST, urlencode(params))
         try:
-            request = Request(url, headers={"User-Agent": "CieloClaro/1.0 (local educational viewer)", "Accept": "application/json"})
+            request = Request(url, headers={"User-Agent": "AerosphereX/1.0 (local educational viewer)", "Accept": "application/json"})
             with urlopen(request, timeout=90) as response:
                 body = response.read(24 * 1024 * 1024 + 1)
                 if len(body) > 24 * 1024 * 1024:
@@ -226,15 +361,15 @@ class Handler(BaseHTTPRequestHandler):
     def handle_fits(self, query):
         target = query.get("url", [""])[0]
         if not is_official_fits_url(target):
-            self.send_json(400, {"error": "El enlace debe ser un FITS oficial de IRSA/SPHEREx."})
+            self.send_json(400, {"error": "El enlace debe ser un FITS oficial de IRSA (SPHEREx o NEOWISE)."})
             return
         too_large = {"error": "El FITS supera el límite local de 512 MB. Descárgalo desde IRSA y carga el archivo manualmente."}
         # Download fully (spilling to disk past 32 MB) before replying, so the browser always gets
         # either a complete file with an exact Content-Length or a JSON error, never a truncated FITS.
         try:
             with tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024) as spool:
-                request = Request(target, headers={"User-Agent": "CieloClaro/1.0 (local educational viewer)"})
-                with FITS_OPENER.open(request, timeout=120) as response:
+                request = Request(target, headers={"User-Agent": "AerosphereX/1.0 (local educational viewer)"})
+                with open_with_retry(request, timeout=120) as response:
                     length = response.headers.get("Content-Length")
                     if length and length.isdigit() and int(length) > MAX_FITS_BYTES:
                         raise FitsTooLarge()
@@ -288,7 +423,7 @@ class Handler(BaseHTTPRequestHandler):
         params = {"request": "doQuery", "lang": "adql", "format": "json", "query": adql}
         url = "https://simbad.cds.unistra.fr/simbad/sim-tap/sync?%s" % urlencode(params)
         try:
-            request = Request(url, headers={"User-Agent": "CieloClaro/1.0 (educational sky-coordinate lookup)", "Accept": "application/json"})
+            request = Request(url, headers={"User-Agent": "AerosphereX/1.0 (educational sky-coordinate lookup)", "Accept": "application/json"})
             with urlopen(request, timeout=45) as response:
                 body = response.read(2 * 1024 * 1024 + 1)
                 if len(body) > 2 * 1024 * 1024:
@@ -324,7 +459,7 @@ class Handler(BaseHTTPRequestHandler):
         params = {"request": "doQuery", "lang": "adql", "format": "json", "query": adql}
         url = "https://simbad.cds.unistra.fr/simbad/sim-tap/sync?%s" % urlencode(params)
         try:
-            request = Request(url, headers={"User-Agent": "CieloClaro/1.0 (educational object-name lookup)", "Accept": "application/json"})
+            request = Request(url, headers={"User-Agent": "AerosphereX/1.0 (educational object-name lookup)", "Accept": "application/json"})
             with urlopen(request, timeout=45) as response:
                 body = response.read(2 * 1024 * 1024 + 1)
                 if len(body) > 2 * 1024 * 1024:
@@ -345,6 +480,50 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(502, {"error": "SIMBAD respondió HTTP %s." % exc.code})
         except (URLError, TimeoutError, OSError) as exc:
             self.send_json(502, {"error": "No se pudo consultar SIMBAD: %s" % str(exc)})
+
+    def handle_mos(self, query):
+        name = query.get("name", [""])[0].strip()
+        mission = query.get("mission", ["spherex"])[0].strip().lower()
+        begin = query.get("begin", [""])[0].strip()
+        end = query.get("end", [""])[0].strip()
+        if not BODY_NAME_RE.match(name):
+            self.send_json(400, {"error": "Escribe un nombre o designación válido (p. ej. 3I Atlas, Florence, Apophis)."})
+            return
+        if mission not in MOST_CATALOGS or (begin and not DATE_RE.match(begin)) or (end and not DATE_RE.match(end)):
+            self.send_json(400, {"error": "Misión o fechas no válidas."})
+            return
+        params = most_params(name, MOST_CATALOGS[mission])
+        if begin:
+            params["obs_begin"] = begin
+        if end:
+            params["obs_end"] = end
+        try:
+            request = Request("%s?%s" % (MOST_URL, urlencode(params)), headers={"User-Agent": "AerosphereX/1.0 (educational moving-object search)"})
+            with urlopen(request, timeout=150) as response:
+                text = response.read(32 * 1024 * 1024).decode("utf-8", "replace")
+        except HTTPError as exc:
+            if exc.code == 400:  # MOST answers 400 for names it cannot resolve to a Solar System body
+                detail = most_message(exc.read(64 * 1024).decode("utf-8", "replace"))
+                self.send_json(404, {"error": "IRSA no reconoció «%s» como asteroide o cometa%s" % (name, (": " + detail) if detail else ".")})
+                return
+            self.send_json(502, {"error": "IRSA MOST respondió HTTP %s." % exc.code})
+            return
+        except (URLError, TimeoutError, OSError) as exc:
+            self.send_json(502, {"error": "No se pudo consultar IRSA MOST: %s" % str(exc)})
+            return
+        meta, rows, is_table = parse_ipac_table(text)
+        if not is_table:
+            self.send_json(404, {"error": "IRSA no reconoció «%s»: %s" % (name, most_message(text) or "sin detalles")})
+            return
+        frames = most_frames(rows, mission)
+        total = len(frames)
+        if total > MAX_MOST_FRAMES:  # keep the whole time span: sample evenly instead of cutting the end
+            step = total / MAX_MOST_FRAMES
+            frames = [frames[int(i * step)] for i in range(MAX_MOST_FRAMES)]
+        self.send_json(200, {
+            "query": name, "mission": mission, "object": meta.get("object_name", name),
+            "total": total, "sampled": total > MAX_MOST_FRAMES, "frames": frames,
+        })
 
     def handle_ephem(self, query):
         name = query.get("name", [""])[0].strip()
@@ -401,7 +580,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    print("Cielo Claro está listo en http://%s:%d" % (HOST, PORT))
+    print("AerosphereX está listo en http://%s:%d" % (HOST, PORT))
     print("Este servidor escucha solo en esta computadora. Presiona Ctrl+C para cerrar.")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:

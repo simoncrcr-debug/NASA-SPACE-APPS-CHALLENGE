@@ -1,13 +1,14 @@
-CIELO CLARO — visor educativo SPHEREx
+AEROSPHEREX — el cielo, explicado con calma (visor educativo SPHEREx y NEOWISE)
 
 INICIO
 1. Instala Python 3 si no está instalado.
 2. Haz doble clic en run.bat.
 3. Se abrirá http://127.0.0.1:8765 en tu navegador.
-4. Escribe coordenadas o una sugerencia. El servidor consulta IRSA y carga el primer FITS compatible.
+4. Escribe el nombre de un asteroide o cometa (p. ej. 3I Atlas, Florence, Apophis), una estrella o unas coordenadas. No hace falta descargar nada a mano: la página busca y descarga las imágenes de IRSA.
 5. Para detenerlo, vuelve a la ventana negra y pulsa Ctrl+C.
 
 FUNCIONES
+- Asteroides y cometas por nombre: el servidor consulta IRSA MOST (Moving Object Search Tool), la misma búsqueda que usa la página de NEOWISE de IRSA, y encuentra las imágenes de SPHEREx (2025–) o NEOWISE (2013–2024) donde aparece el cuerpo. Agrupa las imágenes por visitas, elige una sola banda y descarga hasta 8 recortes centrados en el cuerpo para verlos como animación. Acepta nombres y designaciones como "3I Atlas", "3I/ATLAS", "C/2025 N1", "Florence", "(3122) Florence", "2024 YR4" o el NAIF ID de los enlaces de IRSA (p. ej. 20003122).
 - Búsqueda SIA2 en colecciones oficiales SPHEREx DR1 y QR3.
 - Coincidencia celeste cercana con SIMBAD, marcada como referencia de catálogo y no como clasificación de la imagen.
 - Descarga FITS a través del servidor local para evitar CORS.
@@ -32,6 +33,6 @@ LIMITES CIENTIFICOS
 
 PRIVACIDAD Y CONEXION
 - Los archivos locales se leen en el navegador.
-- server.py solo escucha en 127.0.0.1 (esta computadora) y reenvía búsquedas/descargas a irsa.ipac.caltech.edu.
+- server.py solo escucha en 127.0.0.1 (esta computadora) y reenvía búsquedas/descargas a irsa.ipac.caltech.edu, simbad.cds.unistra.fr y ssd.jpl.nasa.gov.
 - Se requiere conexión a Internet para consultar o descargar datos oficiales.
 - La carga local permite hasta 12 archivos y 512 MB descomprimidos en total; la descarga automática también limita cada producto a 512 MB.

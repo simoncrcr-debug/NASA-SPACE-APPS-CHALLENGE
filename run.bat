@@ -17,5 +17,5 @@ if %errorlevel%==0 (
   )
 )
 echo.
-echo Cielo Claro se cerro. Puedes cerrar esta ventana.
+echo AerosphereX se cerro. Puedes cerrar esta ventana.
 pause

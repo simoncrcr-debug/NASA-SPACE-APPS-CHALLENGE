@@ -4,10 +4,12 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from pathlib import Path
 import json
-import mimetypes
+import posixpath
+import shutil
+import tempfile
 import webbrowser
 
 
@@ -16,6 +18,35 @@ HOST = "127.0.0.1"
 PORT = 8765
 MAX_FITS_BYTES = 512 * 1024 * 1024
 IRSA_HOST = "irsa.ipac.caltech.edu"
+FITS_PATH_PREFIX = "/ibe/data/spherex/"
+
+
+def is_official_fits_url(url):
+    """True only for https URLs on IRSA under the SPHEREx data path (no dot-segment escapes)."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or parsed.hostname != IRSA_HOST or parsed.port not in (None, 443):
+        return False
+    normalized = posixpath.normpath(parsed.path)
+    return normalized.startswith(FITS_PATH_PREFIX) and normalized == parsed.path.rstrip("/")
+
+
+class OfficialFitsRedirectHandler(HTTPRedirectHandler):
+    """Follow redirects only while they stay on the official IRSA SPHEREx data path."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not is_official_fits_url(newurl):
+            raise HTTPError(newurl, code, "Redirección fuera de IRSA/SPHEREx bloqueada.", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+FITS_OPENER = build_opener(OfficialFitsRedirectHandler)
+
+
+class FitsTooLarge(Exception):
+    pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -94,34 +125,42 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_fits(self, query):
         target = query.get("url", [""])[0]
+        if not is_official_fits_url(target):
+            self.send_json(400, {"error": "El enlace debe ser un FITS oficial de IRSA/SPHEREx."})
+            return
+        too_large = {"error": "El FITS supera el límite local de 512 MB. Descárgalo desde IRSA y carga el archivo manualmente."}
+        # Download fully (spilling to disk past 32 MB) before replying, so the browser always gets
+        # either a complete file with an exact Content-Length or a JSON error, never a truncated FITS.
         try:
-            parsed = urlparse(target)
-            if parsed.scheme != "https" or parsed.hostname != IRSA_HOST or not parsed.path.startswith("/ibe/data/spherex/"):
-                self.send_json(400, {"error": "El enlace debe ser un FITS oficial de IRSA/SPHEREx."})
-                return
-            request = Request(target, headers={"User-Agent": "CieloClaro/1.0 (local educational viewer)"})
-            with urlopen(request, timeout=120) as response:
-                length = response.headers.get("Content-Length")
-                if length and int(length) > MAX_FITS_BYTES:
-                    self.send_json(413, {"error": "El FITS supera el límite local de 512 MB. Descárgalo desde IRSA y carga el archivo manualmente."})
-                    return
-                self.send_response(200)
-                self.send_header("Content-Type", "application/fits")
-                if length:
-                    self.send_header("Content-Length", length)
-                self.send_header("Content-Disposition", "inline; filename=SPHEREx.fits")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                total = 0
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_FITS_BYTES:
-                        self.close_connection = True
-                        break
-                    self.wfile.write(chunk)
+            with tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024) as spool:
+                request = Request(target, headers={"User-Agent": "CieloClaro/1.0 (local educational viewer)"})
+                with FITS_OPENER.open(request, timeout=120) as response:
+                    length = response.headers.get("Content-Length")
+                    if length and length.isdigit() and int(length) > MAX_FITS_BYTES:
+                        raise FitsTooLarge()
+                    total = 0
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_FITS_BYTES:
+                            raise FitsTooLarge()
+                        spool.write(chunk)
+                spool.seek(0)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/fits")
+                    self.send_header("Content-Length", str(total))
+                    self.send_header("Content-Disposition", "inline; filename=SPHEREx.fits")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    shutil.copyfileobj(spool, self.wfile, 1024 * 1024)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    # The browser closed the connection (e.g. a newer search); nothing left to send.
+                    self.close_connection = True
+        except FitsTooLarge:
+            self.send_json(413, too_large)
         except HTTPError as exc:
             self.send_json(502, {"error": "IRSA respondió HTTP %s al descargar el FITS." % exc.code})
         except (URLError, TimeoutError, OSError, ValueError) as exc:
@@ -218,9 +257,8 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self.send_error(404, "No se encontró index.html")
             return
-        mime = mimetypes.guess_type(str(path))[0] or "text/html"
         self.send_response(200)
-        self.send_header("Content-Type", mime + "; charset=utf-8")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()

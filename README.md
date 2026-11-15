@@ -64,7 +64,12 @@ Funciona, pero solo para **abrir archivos FITS propios**. Las búsquedas y desca
    - **Coordenadas:** `133.7951, -7.2451` o `08h55m10.831s, −7d14m42.53s`.
 2. Elige el archivo de imágenes: **SPHEREx o NEOWISE** (automático), **solo SPHEREx** (2025 en adelante) o **solo NEOWISE** (2013–2024).
 3. Para asteroides y cometas, la página descarga hasta 8 imágenes de una misma "visita". Pulsa **▶** para verlas como animación: el objeto queda en el centro y las estrellas del fondo se mueven.
-4. También puedes abrir tus propios archivos con **＋ Abrir FITS** (`.fits`, `.fit`, `.fts`, `.fits.gz`, hasta 12 a la vez) y escribir debajo de la imagen el nombre del cuerpo que buscas para que se marque su posición.
+4. Debajo de la imagen verás:
+   - La **fecha de la observación** (también aparece sobre la imagen).
+   - **Datos oficiales** del objeto (tamaño, tipo de órbita, descubrimiento…) tomados de **NASA/JPL SBDB** para asteroides y cometas, o de **NASA/IPAC NED** para estrellas y galaxias. Se usan el nombre que buscaste o el nombre `OBJECT` escrito en el FITS.
+   - **Riesgo para la Tierra**, con datos de **NASA/JPL CNEOS**: si está o estuvo en la lista de vigilancia de impactos *Sentry*, sus próximos pasos cercanos y la distancia en la imagen, explicados con calma.
+   - El botón **"Origen del FITS ↗"** abre en el navegador el archivo original en IRSA (o la zona del cielo en IRSA si el archivo es local). En una búsqueda de asteroides, **"Ver esta búsqueda en IRSA ↗"** abre los mismos resultados en la web de IRSA.
+5. También puedes abrir tus propios archivos con **＋ Abrir FITS** (`.fits`, `.fit`, `.fts`, `.fits.gz`, hasta 12 a la vez) y escribir debajo de la imagen el nombre del cuerpo que buscas para que se marque su posición.
 
 Más detalles de las funciones y sus límites científicos en [`LEEME.txt`](LEEME.txt).
 
@@ -81,6 +86,8 @@ Más detalles de las funciones y sus límites científicos en [`LEEME.txt`](LEEM
 
 - **NASA/IPAC IRSA** — imágenes SPHEREx y NEOWISE, y el buscador de objetos móviles MOST.
 - **JPL Horizons** (NASA) — posición de planetas, asteroides y cometas en una fecha exacta.
+- **NASA/JPL SBDB, Sentry y CAD** — ficha oficial de asteroides y cometas, vigilancia de impactos y pasos cercanos a la Tierra.
+- **NASA/IPAC NED** — ficha oficial de galaxias y estrellas.
 - **SIMBAD** (CDS, Estrasburgo) — nombres y posiciones de estrellas y galaxias.
 
 ## Problemas comunes

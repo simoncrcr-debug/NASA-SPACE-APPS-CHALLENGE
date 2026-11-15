@@ -9,6 +9,10 @@ INICIO
 
 FUNCIONES
 - Asteroides y cometas por nombre: el servidor consulta IRSA MOST (Moving Object Search Tool), la misma búsqueda que usa la página de NEOWISE de IRSA, y encuentra las imágenes de SPHEREx (2025–) o NEOWISE (2013–2024) donde aparece el cuerpo. Agrupa las imágenes por visitas, elige una sola banda y descarga hasta 8 recortes centrados en el cuerpo para verlos como animación. Acepta nombres y designaciones como "3I Atlas", "3I/ATLAS", "C/2025 N1", "Florence", "(3122) Florence", "2024 YR4" o el NAIF ID de los enlaces de IRSA (p. ej. 20003122).
+- Fecha de observación visible sobre la imagen y en la ficha.
+- Datos oficiales bajo la imagen: NASA/JPL SBDB (asteroides y cometas) o NASA/IPAC NED (estrellas y galaxias), usando el nombre buscado o el OBJECT del FITS.
+- Riesgo para la Tierra (NASA/JPL CNEOS): estado en la lista Sentry (en vigilancia, descartado o sin riesgo conocido), pasos cercanos a menos de 0,05 UA entre 1900 y 2200, MOID y distancia en la imagen. Si el objeto está lejos y no es NEO, se indica que no hay riesgo.
+- Botón "Origen del FITS": abre el archivo original en IRSA; para FITS locales de NEOWISE se reconstruye a partir de SCAN/FRNUM/BAND, y si no, abre la zona del cielo en IRSA.
 - Búsqueda SIA2 en colecciones oficiales SPHEREx DR1 y QR3.
 - Coincidencia celeste cercana con SIMBAD, marcada como referencia de catálogo y no como clasificación de la imagen.
 - Descarga FITS a través del servidor local para evitar CORS.

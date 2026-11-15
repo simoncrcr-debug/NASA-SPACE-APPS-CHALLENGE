@@ -3,7 +3,7 @@
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, quote as urllib_quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from pathlib import Path
 import json
@@ -280,6 +280,122 @@ def horizons_candidates(result):
     return [l for l in lines if re.match(r"^-?\d+\s+\S", l)][:6]
 
 
+# ---- Official reference data: NASA/JPL SBDB, Sentry (impact monitoring), CAD (close approaches), NASA/IPAC NED ----
+SSD_API = "https://ssd-api.jpl.nasa.gov"
+NEAR_EARTH_AU = 0.05  # NASA's threshold for "potentially hazardous" orbits (about 19.5 Earth-Moon distances)
+
+
+def get_json(url, timeout=45):
+    request = Request(url, headers={"User-Agent": "AerosphereX/1.0 (educational viewer)", "Accept": "application/json"})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read(4 * 1024 * 1024).decode("utf-8"))
+    except HTTPError as exc:
+        if exc.code == 300:  # SBDB: "matched more than one object" comes with a JSON list of candidates
+            return json.loads(exc.read(4 * 1024 * 1024).decode("utf-8"))
+        raise
+
+
+def sbdb_query(name):
+    """SBDB search parameters for a free-text body name, or None for major planets (not in SBDB)."""
+    body = classify_body(name)
+    if body["kind"] == "major":
+        return None
+    if body["kind"] == "comet":
+        return {"sstr": body["des"]}
+    if body["kind"] == "asteroid_number":
+        return {"sstr": str(body["number"])}
+    if body["kind"] == "naif":
+        return {"spk": body["naif"]}
+    return {"sstr": body["name"]}
+
+
+def phys_value(data, key):
+    for p in data.get("phys_par") or []:
+        if p.get("name") == key:
+            return {"value": p.get("value"), "units": p.get("units") or "", "title": p.get("title") or key}
+    return None
+
+
+def sentry_status(des):
+    try:
+        data = get_json("%s/sentry.api?%s" % (SSD_API, urlencode({"des": des})))
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+        return {"status": "unknown"}
+    if data.get("removed"):
+        return {"status": "removed", "removed": data["removed"][:10]}
+    summary = data.get("summary")
+    if not summary:
+        return {"status": "not_listed"}
+    years = sorted({str(row.get("date", ""))[:4] for row in data.get("data") or [] if row.get("date")})
+    return {
+        "status": "listed", "ip": summary.get("ip"), "ps_max": summary.get("ps_max"), "ps_cum": summary.get("ps_cum"),
+        "ts_max": summary.get("ts_max"), "n_imp": summary.get("n_imp"), "diameter_km": summary.get("diameter"),
+        "years": [years[0], years[-1]] if years else None,
+    }
+
+
+def close_approaches(des):
+    """Earth close approaches closer than NEAR_EARTH_AU between 1900 and 2200 (NASA/JPL CAD)."""
+    params = {"des": des, "date-min": "1900-01-01", "date-max": "2200-01-01", "dist-max": str(NEAR_EARTH_AU), "body": "Earth"}
+    try:
+        data = get_json("%s/cad.api?%s" % (SSD_API, urlencode(params)))
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+        return None
+    fields = data.get("fields") or []
+    out = []
+    for row in data.get("data") or []:
+        r = dict(zip(fields, row))
+        out.append({"date": r.get("cd"), "jd": to_float(r.get("jd")), "dist_au": to_float(r.get("dist")),
+                    "dist_min_au": to_float(r.get("dist_min")), "v_rel_kms": to_float(r.get("v_rel"))})
+    return out
+
+
+def official_small_body(name):
+    query = sbdb_query(name)
+    if query is None:
+        return None
+    query.update({"phys-par": "1", "discovery": "1"})
+    data = get_json("%s/sbdb.api?%s" % (SSD_API, urlencode(query)))
+    if data.get("list"):
+        return {"kind": "ambiguous", "candidates": [c.get("name") or c.get("pdes") for c in data["list"]][:8]}
+    obj = data.get("object")
+    if not obj:
+        return None
+    des = obj.get("des") or obj.get("prefix", "")
+    orbit = data.get("orbit") or {}
+    discovery = data.get("discovery") or {}
+    return {
+        "kind": "small_body", "source": "NASA/JPL Small-Body Database",
+        "fullname": obj.get("fullname"), "des": des, "neo": bool(obj.get("neo")), "pha": bool(obj.get("pha")),
+        "is_comet": str(obj.get("kind", "")).startswith("c"),
+        "orbit_class": (obj.get("orbit_class") or {}).get("name"),
+        "moid_au": to_float(orbit.get("moid")), "first_obs": orbit.get("first_obs"), "last_obs": orbit.get("last_obs"),
+        "phys": {k: phys_value(data, k) for k in ("diameter", "H", "albedo", "rot_per", "M1")},
+        "discovery": {"date": discovery.get("date"), "site": discovery.get("site"), "who": discovery.get("discovery")},
+        "sentry": sentry_status(des),
+        "approaches": close_approaches(des),
+        "links": {
+            "sbdb": "https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html#/?sstr=%s" % urllib_quote(des),
+            "sentry": "https://cneos.jpl.nasa.gov/sentry/details.html#?des=%s" % urllib_quote(des),
+        },
+    }
+
+
+def official_ned(name):
+    data = get_json("https://ned.ipac.caltech.edu/srs/ObjectLookup?%s" % urlencode({"name": name}))
+    preferred = data.get("Preferred") or {}
+    if not preferred.get("Name"):
+        return None
+    position = preferred.get("Position") or {}
+    return {
+        "kind": "ned", "source": "NASA/IPAC Extragalactic Database (NED)",
+        "fullname": preferred.get("Name"), "type": (preferred.get("ObjType") or {}).get("Value"),
+        "ra": position.get("RA"), "dec": position.get("Dec"), "redshift": (preferred.get("Redshift") or {}).get("Value"),
+        "links": {"ned": "https://ned.ipac.caltech.edu/byname?%s" % urlencode({"objname": preferred.get("Name")})},
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "AerosphereX/1.0"
 
@@ -298,6 +414,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_name(parse_qs(parsed.query))
         elif parsed.path == "/api/ephem":
             self.handle_ephem(parse_qs(parsed.query))
+        elif parsed.path == "/api/official":
+            self.handle_official(parse_qs(parsed.query))
         elif parsed.path == "/api/mos":
             self.handle_mos(parse_qs(parsed.query))
         elif parsed.path == "/api/health":
@@ -481,6 +599,38 @@ class Handler(BaseHTTPRequestHandler):
         except (URLError, TimeoutError, OSError) as exc:
             self.send_json(502, {"error": "No se pudo consultar SIMBAD: %s" % str(exc)})
 
+    def handle_official(self, query):
+        name = query.get("name", [""])[0].strip()
+        if not BODY_NAME_RE.match(name):
+            self.send_json(400, {"error": "Nombre no válido."})
+            return
+        body = classify_body(name)
+        try:
+            if body["kind"] == "major":
+                self.send_json(200, {"kind": "major", "fullname": name, "source": "NASA/JPL"})
+                return
+            result = official_small_body(name)
+            if result and result["kind"] == "ambiguous" and body["kind"] == "text":
+                ned = official_ned(name)  # "Atlas" matches many comets; a galaxy/star name may still be unique in NED
+                if ned:
+                    result = ned
+            if not result:
+                result = official_ned(name)
+        except HTTPError as exc:
+            self.send_json(502, {"error": "El servicio oficial respondió HTTP %s." % exc.code})
+            return
+        except (URLError, TimeoutError, OSError, ValueError) as exc:
+            self.send_json(502, {"error": "No se pudo consultar NASA/JPL o NED: %s" % str(exc)})
+            return
+        if not result:
+            self.send_json(404, {"error": "No hay datos oficiales para «%s» en NASA/JPL SBDB ni en NED." % name})
+            return
+        if result["kind"] == "ambiguous":
+            self.send_json(404, {"error": "«%s» coincide con varios objetos." % name, "candidates": result["candidates"]})
+            return
+        result["query"] = name
+        self.send_json(200, result)
+
     def handle_mos(self, query):
         name = query.get("name", [""])[0].strip()
         mission = query.get("mission", ["spherex"])[0].strip().lower()
@@ -523,6 +673,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {
             "query": name, "mission": mission, "object": meta.get("object_name", name),
             "total": total, "sampled": total > MAX_MOST_FRAMES, "frames": frames,
+            # Same search as an IRSA web page (output_mode=Regular renders HTML with previews) for the "Ver en IRSA" button
+            "irsa_url": "%s?%s" % (MOST_URL, urlencode(dict(params, output_mode="Regular"))),
         })
 
     def handle_ephem(self, query):

@@ -1,0 +1,35 @@
+CIELO CLARO — visor educativo SPHEREx
+
+INICIO
+1. Instala Python 3 si no está instalado.
+2. Haz doble clic en run.bat.
+3. Se abrirá http://127.0.0.1:8765 en tu navegador.
+4. Escribe coordenadas o una sugerencia. El servidor consulta IRSA y carga el primer FITS compatible.
+5. Para detenerlo, vuelve a la ventana negra y pulsa Ctrl+C.
+
+FUNCIONES
+- Búsqueda SIA2 en colecciones oficiales SPHEREx DR1 y QR3.
+- Coincidencia celeste cercana con SIMBAD, marcada como referencia de catálogo y no como clasificación de la imagen.
+- Descarga FITS a través del servidor local para evitar CORS.
+- Carga simultánea de hasta 12 FITS (.fits, .fit, .fts y .fits.gz), zoom con rueda y desplazamiento arrastrando el mouse.
+- Reproducción tipo microvideo de los canales de un cubo 3D; en cubos SPHEREx, cada paso se etiqueta con su longitud de onda cuando existe la tabla SPECTRAL_CHANNELS.
+- Secuencia reproducible de varios archivos. Esta secuencia compara archivos/bandas y no implica que sean instantes de un video temporal.
+- Marcador amarillo para la coordenada consultada cuando el FITS incluye WCS celeste y la posición cae dentro del campo mostrado. El marcador señala la búsqueda, no identifica automáticamente un asteroide.
+- Si se abre un FITS sin coordenada consultada, el marcador puede señalar el pico de píxel más brillante cerca del centro como aproximación visual; la ficha bajo la imagen lee OBJECT y contrasta el nombre con SIMBAD si está disponible.
+- Selector de extensiones FITS (HDU); extensiones auxiliares como máscaras o mapas de calidad no se tratan como canales espectrales.
+- Comparación visual de hasta dos productos reales que devuelva la búsqueda.
+- Medición angular y tamaño lineal orientativo de una región si el FITS contiene escala WCS y se conoce la distancia.
+- Luminosidad espectral aproximada por banda cuando se carga un cubo 3D en MJy/sr con escala WCS y distancia. No representa luminosidad bolométrica.
+
+LIMITES CIENTIFICOS
+- SPHEREx mide imágenes y espectros infrarrojos; una imagen sola no identifica un asteroide ni predice una colisión.
+- La luminosidad total requiere distancia y un espectro calibrado completo. El visor solo ofrece luminosidad espectral aproximada de una región cuando el FITS y las unidades lo permiten.
+- La búsqueda por coordenadas indica qué productos cubren esa zona, no el nombre catalogado de cada punto del campo.
+- Una imagen o un marcador de posición no confirma que un objeto sea peligroso ni que sea un asteroide. El marcador amarillo representa la coordenada de consulta, igual que en el visor IRSA.
+- Para evaluar el riesgo de un asteroide conocido, consulta las órbitas y el sistema Sentry de NASA/JPL CNEOS.
+
+PRIVACIDAD Y CONEXION
+- Los archivos locales se leen en el navegador.
+- server.py solo escucha en 127.0.0.1 (esta computadora) y reenvía búsquedas/descargas a irsa.ipac.caltech.edu.
+- Se requiere conexión a Internet para consultar o descargar datos oficiales.
+- La carga local permite hasta 12 archivos y 512 MB descomprimidos en total; la descarga automática también limita cada producto a 512 MB.

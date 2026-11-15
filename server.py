@@ -8,8 +8,10 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from pathlib import Path
 import json
 import posixpath
+import re
 import shutil
 import tempfile
+import unicodedata
 import webbrowser
 
 
@@ -49,6 +51,102 @@ class FitsTooLarge(Exception):
     pass
 
 
+# ---- JPL Horizons: where was a Solar System body, seen from the telescope, at the frame's time? ----
+HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
+# Horizons observer centers: spacecraft NAIF IDs (parallax matters for nearby bodies), geocenter otherwise.
+OBSERVERS = {
+    "wise": ("500@-163", "WISE/NEOWISE"),
+    "spherex": ("500@-163182", "SPHEREx"),
+    "earth": ("500@399", "centro de la Tierra"),
+}
+MAJOR_BODIES = {
+    "sol": "10", "sun": "10", "luna": "301", "moon": "301",
+    "mercurio": "199", "mercury": "199", "venus": "299", "marte": "499", "mars": "499",
+    "jupiter": "599", "saturno": "699", "saturn": "699", "urano": "799", "uranus": "799",
+    "neptuno": "899", "neptune": "899", "pluton": "999", "pluto": "999",
+}
+BODY_NAME_RE = re.compile(r"^[0-9A-Za-zÀ-ÿ][0-9A-Za-zÀ-ÿ ./()\-_]{0,59}$")
+# Numbered periodic/interstellar comets ("3I", "1P/Halley") and provisional comet designations ("C/2025 N1").
+NUMBERED_COMET_RE = re.compile(r"^(\d{1,4}[PI])(?:\s*[/-].*)?$", re.IGNORECASE)
+PROVISIONAL_COMET_RE = re.compile(r"^([PCDXI]/\d{4}\s+[A-Z]{1,2}\d{0,3})(?:\s*\(.*\))?$", re.IGNORECASE)
+
+
+def strip_accents(text):
+    return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
+
+
+def horizons_commands(name):
+    """Ordered Horizons COMMAND candidates; the first one that yields an ephemeris wins."""
+    key = strip_accents(name).lower().strip()
+    if key in MAJOR_BODIES:
+        return [MAJOR_BODIES[key]]
+    m = NUMBERED_COMET_RE.match(name)
+    if m:  # bare "1P" would match unrelated bodies, so force a designation search
+        return ["DES=%s;CAP;NOFRAG" % m.group(1).upper()]
+    m = PROVISIONAL_COMET_RE.match(name)
+    if m:
+        return ["DES=%s;CAP;NOFRAG" % re.sub(r"\s+", " ", m.group(1).upper())]
+    # Trailing ';' restricts the lookup to small bodies (asteroids/comets), then fall back to major bodies.
+    return [name + ";", name]
+
+
+def query_horizons(command, center, jd):
+    params = {
+        "format": "json", "COMMAND": "'%s'" % command, "EPHEM_TYPE": "OBSERVER", "CENTER": "'%s'" % center,
+        "TLIST": "'%.8f'" % jd, "QUANTITIES": "'1,9,19,20'", "OBJ_DATA": "NO", "MAKE_EPHEM": "YES",
+        "ANG_FORMAT": "DEG", "CSV_FORMAT": "YES", "EXTRA_PREC": "YES",
+    }
+    request = Request("%s?%s" % (HORIZONS_URL, urlencode(params)), headers={"User-Agent": "CieloClaro/1.0 (educational ephemeris lookup)"})
+    with urlopen(request, timeout=60) as response:
+        body = response.read(1024 * 1024)
+    return json.loads(body.decode("utf-8")).get("result", "")
+
+
+def parse_horizons(result):
+    """Return the single ephemeris row as a dict, or None when Horizons did not produce one."""
+    start, end = result.find("$$SOE"), result.find("$$EOE")
+    if start < 0 or end < 0:
+        return None
+    header = next((l for l in result[:start].splitlines() if "Date__(UT)" in l), "")
+    row = result[start + 5:end].strip().splitlines()
+    if not header or not row:
+        return None
+    cols = [c.strip() for c in header.split(",")]
+    vals = [v.strip() for v in row[0].split(",")]
+    data = dict(zip(cols, vals))
+
+    def num(*keys):
+        for k in keys:
+            try:
+                return float(data[k])
+            except (KeyError, ValueError):
+                continue
+        return None
+
+    target = ""
+    for line in result.splitlines():
+        if line.startswith("Target body name:"):
+            target = re.sub(r"\s*\{source:.*$", "", line.split(":", 1)[1]).strip()
+            break
+    mag_type = "T-mag" if "T-mag" in data else ("APmag" if "APmag" in data else "")
+    return {
+        "target": target,
+        "time_utc": data.get("Date__(UT)__HR:MN:SC.fff", ""),
+        "ra": num(*[k for k in cols if k.startswith("R.A.") and "ICRF" in k]),
+        "dec": num(*[k for k in cols if k.startswith("DEC") and "ICRF" in k]),
+        "mag": num("T-mag", "APmag"),
+        "mag_type": mag_type,
+        "r_au": num("r"),
+        "delta_au": num("delta"),
+    }
+
+
+def horizons_candidates(result):
+    """Lines listing alternative matches when Horizons could not pick one body."""
+    lines = [l.strip() for l in result.splitlines()]
+    return [l for l in lines if re.match(r"^-?\d+\s+\S", l)][:6]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "CieloClaro/1.0"
 
@@ -65,6 +163,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_object(parse_qs(parsed.query))
         elif parsed.path == "/api/name":
             self.handle_name(parse_qs(parsed.query))
+        elif parsed.path == "/api/ephem":
+            self.handle_ephem(parse_qs(parsed.query))
         elif parsed.path == "/api/health":
             self.send_json(200, {"ok": True, "service": "Cielo Claro", "irsa": IRSA_HOST})
         else:
@@ -245,6 +345,41 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(502, {"error": "SIMBAD respondió HTTP %s." % exc.code})
         except (URLError, TimeoutError, OSError) as exc:
             self.send_json(502, {"error": "No se pudo consultar SIMBAD: %s" % str(exc)})
+
+    def handle_ephem(self, query):
+        name = query.get("name", [""])[0].strip()
+        observer = query.get("observer", ["earth"])[0].strip().lower()
+        try:
+            jd = float(query.get("jd", [""])[0])
+        except ValueError:
+            jd = float("nan")
+        if not BODY_NAME_RE.match(name):
+            self.send_json(400, {"error": "Escribe un nombre o designación válido (p. ej. 3I, Ceres, 1P/Halley)."})
+            return
+        if not (2378496.5 <= jd <= 2524593.5):  # Horizons small-body range used here: years 1800-2200
+            self.send_json(400, {"error": "Fecha de observación no válida."})
+            return
+        center, observer_label = OBSERVERS.get(observer, OBSERVERS["earth"])
+        last_result = ""
+        try:
+            for command in horizons_commands(name):
+                last_result = query_horizons(command, center, jd)
+                ephem = parse_horizons(last_result)
+                if ephem and ephem["ra"] is not None and ephem["dec"] is not None:
+                    ephem.update({"query": name, "observer": observer_label, "center": center, "jd": jd, "source": "JPL Horizons"})
+                    self.send_json(200, ephem)
+                    return
+        except HTTPError as exc:
+            self.send_json(502, {"error": "JPL Horizons respondió HTTP %s." % exc.code})
+            return
+        except (URLError, TimeoutError, OSError, ValueError) as exc:
+            self.send_json(502, {"error": "No se pudo consultar JPL Horizons: %s" % str(exc)})
+            return
+        candidates = horizons_candidates(last_result)
+        message = "JPL Horizons no encontró un único cuerpo llamado «%s»." % name
+        if candidates:
+            message += " Coincidencias: " + "; ".join(candidates)
+        self.send_json(404, {"error": message, "candidates": candidates})
 
     def serve_page(self, request_path):
         if request_path in ("/", "/index.html"):

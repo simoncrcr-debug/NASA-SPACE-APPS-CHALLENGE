@@ -16,6 +16,8 @@ FUNCIONES
 - Secuencia reproducible de varios archivos. Esta secuencia compara archivos/bandas y no implica que sean instantes de un video temporal.
 - Marcador amarillo para la coordenada consultada cuando el FITS incluye WCS celeste y la posición cae dentro del campo mostrado. El marcador señala la búsqueda, no identifica automáticamente un asteroide.
 - Si se abre un FITS sin coordenada consultada, el marcador puede señalar el pico de píxel más brillante cerca del centro como aproximación visual; la ficha bajo la imagen lee OBJECT y contrasta el nombre con SIMBAD si está disponible.
+- Cuerpos del Sistema Solar (asteroides, cometas, planetas): escribe su nombre o designación (p. ej. 3I, Ceres, 1P/Halley) bajo la imagen y JPL Horizons calcula dónde estaba en la fecha exacta de cada FITS, visto desde el telescopio (WISE/NEOWISE, SPHEREx o, si no se reconoce, el centro de la Tierra). Es una predicción de posición, no una detección. El último nombre se recuerda y se comprueba al abrir nuevos archivos.
+- Recortes de IRSA con "_ra…_dec…" en el nombre de archivo: el marcador señala ese centro (la posición pedida) aunque el encabezado no tenga nombre de objeto. Compatible con imágenes WISE/NEOWISE (proyección SIN con distorsión SIP, fecha en DATE_OBS/MJD_OBS).
 - Selector de extensiones FITS (HDU); extensiones auxiliares como máscaras o mapas de calidad no se tratan como canales espectrales.
 - Comparación visual de hasta dos productos reales que devuelva la búsqueda.
 - Medición angular y tamaño lineal orientativo de una región si el FITS contiene escala WCS y se conoce la distancia.

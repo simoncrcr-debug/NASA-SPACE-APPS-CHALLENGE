@@ -2,9 +2,9 @@
 setlocal
 cd /d "%~dp0"
 rem Windows downloads trusted root certificates on demand, but only for its own TLS stack.
-rem Python reads that same store, so touch IRSA and SIMBAD once through Windows first;
+rem Python reads that same store, so touch IRSA, SIMBAD and JPL once through Windows first;
 rem otherwise the first searches can fail with CERTIFICATE_VERIFY_FAILED on a fresh PC.
-powershell -NoProfile -Command "foreach ($u in 'https://irsa.ipac.caltech.edu/','https://simbad.cds.unistra.fr/') { try { Invoke-WebRequest $u -UseBasicParsing -Method Head -TimeoutSec 15 | Out-Null } catch {} }" >nul 2>nul
+powershell -NoProfile -Command "foreach ($u in 'https://irsa.ipac.caltech.edu/','https://simbad.cds.unistra.fr/','https://ssd.jpl.nasa.gov/api/horizons.api') { try { Invoke-WebRequest $u -UseBasicParsing -Method Head -TimeoutSec 15 | Out-Null } catch {} }" >nul 2>nul
 where py >nul 2>nul
 if %errorlevel%==0 (
   py -3 server.py
